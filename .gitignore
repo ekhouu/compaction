@@ -5,3 +5,7 @@ __pycache__/
 .claude/
 data/reference_answers_cache/*ruler*
 data/longbenchv2_cache.jsonl
+
+# Local downloaded model weights / caches
+.hf-models/
+.hf-cache/

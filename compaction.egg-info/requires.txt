@@ -1,0 +1,8 @@
+torch==2.8.0
+transformers==4.57.1
+vllm==0.11.0
+accelerate==1.12.0
+datasets==4.4.1
+numpy>=1.26
+requests>=2.32
+huggingface-hub>=0.24
