@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .notify import notify_eval_start, notify_method_done, notify_eval_done
+
 from compaction.compaction_methods import FullCacheCompactionAlgorithm
 from compaction.algorithms.base import evaluate_compaction
 from models.generate import (
@@ -2284,6 +2286,16 @@ class QAEvaluator:
               f"max_query_vectors_per_kv_head={query_config.max_query_vectors_per_kv_head}")
         print(f"{'='*60}\n")
 
+        _eval_start_time = time.time()
+        notify_eval_start(
+            methods=compaction_methods,
+            dataset=dataset_name,
+            model=self.model_name,
+            target_size=target_size,
+            n_articles=len(article_indices),
+            experiment_name=experiment_name,
+        )
+
         # Initialize vLLM once if needed (will be reused across all articles)
         # vLLM is needed for:
         # 1. Self-study query generation
@@ -2383,6 +2395,20 @@ class QAEvaluator:
 
                 all_results.append(result)
 
+                # Discord progress notification
+                _qa = result.get('qa_results', {})
+                _article_acc = _qa.get('accuracy')
+                _article_ppl = result.get('avg_perplexity')
+                _article_time = result.get('compaction_time')
+                notify_method_done(
+                    method=method_name,
+                    article_idx=article_idx - start_article,
+                    n_articles=len(article_indices),
+                    accuracy=_article_acc,
+                    perplexity=_article_ppl,
+                    elapsed_sec=_article_time,
+                )
+
         # Save results
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
@@ -2466,5 +2492,11 @@ class QAEvaluator:
         if query_config_file:
             print(f"Query config file: {query_config_file}")
         print(f"{'='*60}\n")
+
+        notify_eval_done(
+            overall_stats=overall_stats,
+            results_path=str(filepath),
+            total_elapsed_sec=time.time() - _eval_start_time,
+        )
 
         return output

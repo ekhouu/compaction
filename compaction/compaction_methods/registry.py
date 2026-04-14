@@ -16,6 +16,7 @@ from .summarize import SummarizeCompaction
 from .summarize_then_compact import SummarizeThenCompact
 from .duo_attention import DuoAttentionCompaction
 from .no_context import NoContextCompaction
+from .quantized_wrapper import QuantizedCacheMethod, QuantizeThenCompact
 from ..algorithms import ALGORITHM_REGISTRY
 
 
@@ -48,6 +49,27 @@ def get_compaction_method(
     if method_name == 'original':
         # Special case: return a no-op compaction method
         return OriginalCacheMethod()
+
+    # --- Quantization handling ---
+    # 'quantize' in kwargs means "inject quantization noise".
+    # algorithm='quantize_only' → quantise, no compaction (TQ+ arm).
+    # algorithm=<anything else> + quantize=<preset> → quantise then compact (TQ+AM arm).
+    quant_preset = method_kwargs.get('quantize', None)
+    base_algorithm = method_kwargs.get('algorithm', method_name)
+
+    if base_algorithm == 'quantize_only':
+        preset = quant_preset or 'int8'
+        return QuantizedCacheMethod(quant_preset=preset, config_name=method_name)
+
+    if quant_preset is not None and quant_preset.lower() != 'none':
+        # Build the inner compaction method WITHOUT the 'quantize' key
+        inner_kwargs = {k: v for k, v in method_kwargs.items() if k != 'quantize'}
+        inner_method = get_compaction_method(method_name, inner_kwargs)
+        return QuantizeThenCompact(
+            inner_method=inner_method,
+            quant_preset=quant_preset,
+            config_name=method_name,
+        )
 
     # Check if chunked compaction is enabled FIRST
     # This allows any compaction method to be wrapped with chunking

@@ -35,9 +35,19 @@ COMPACTION_METHOD_ALIASES: dict[str, str] = {
     "random_subset": "random_subset_keys_nnls2_-3_3_lsq_on-policy",
     "random_vector": "random_vector_keys_nnls2_-3_3_lsq_on-policy",
     "truncate": "truncate_nnls2_-3_3_lsq_on-policy",
+    # Ceteris paribus aliases (use with --compaction-algorithm-config ceteris_paribus)
+    "TQ_int8": "TQ_int8",
+    "TQ_int4": "TQ_int4",
+    "TQ_int2": "TQ_int2",
+    "TQ_int8_AM": "TQ_int8_AM",
+    "TQ_int4_AM": "TQ_int4_AM",
+    "TQ_int2_AM": "TQ_int2_AM",
 }
 
 DEFAULT_COMPACTION_METHODS = "AM,random_subset,truncate"
+
+# Shorthand for the 4-way ceteris paribus comparison (original is always included)
+CETERIS_PARIBUS_METHODS = "AM,TQ_int8,TQ_int8_AM"
 
 # RULER NIAH dataset names are of the form 'ruler_<len>[_task]' where <len>
 # is e.g. '4k', '16k', '128k'. This regex extracts just the length token.
