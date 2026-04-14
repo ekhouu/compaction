@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NO, I am not using GGUF to test compression. I'm dumb but not that dumb.
+#
 # Auto-download a GGUF model, then run batched benchmarks.
 #
 # Defaults can be overridden via env vars:
 #   GGUF_REPO=Qwen/Qwen3-4B-GGUF
-#   GGUF_FILE=Qwen3-4B-Q4_K_M.gguf
+#   GGUF_FILE=Qwen3-4B-Q8_0.gguf
 #   GGUF_DIR=/home/mikhoiuo/repos/compaction/.gguf-models
 #   UV_CACHE_DIR=/tmp/uv-cache
 #
@@ -19,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 GGUF_REPO="${GGUF_REPO:-Qwen/Qwen3-4B-GGUF}"
-GGUF_FILE="${GGUF_FILE:-Qwen3-4B-Q4_K_M.gguf}"
+GGUF_FILE="${GGUF_FILE:-Qwen3-4B-Q8_0.gguf}"
 GGUF_DIR="${GGUF_DIR:-${REPO_ROOT}/.gguf-models}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
 
@@ -69,6 +71,12 @@ if [[ ! -f "${GGUF_PATH}" ]]; then
   exit 1
 fi
 
+GGUF_SHA256=""
+if command -v sha256sum >/dev/null 2>&1; then
+  GGUF_SHA256="$(sha256sum "${GGUF_PATH}" | awk '{print $1}')"
+  echo "GGUF SHA256: ${GGUF_SHA256}"
+fi
+
 if [[ "${DOWNLOAD_ONLY}" == "1" ]]; then
   echo "Download complete: ${GGUF_PATH}"
   exit 0
@@ -81,6 +89,9 @@ if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
 fi
 
 cd "${REPO_ROOT}"
-UV_CACHE_DIR="${UV_CACHE_DIR}" uv run python tests/batched/run_batched_benchmarks.py \
-  --gguf-model "${GGUF_PATH}" \
-  "${RUNNER_ARGS[@]}"
+RUN_CMD=(uv run python tests/batched/run_batched_benchmarks.py --gguf-model "${GGUF_PATH}")
+if [[ -n "${GGUF_SHA256}" ]]; then
+  RUN_CMD+=(--gguf-sha256 "${GGUF_SHA256}")
+fi
+RUN_CMD+=("${RUNNER_ARGS[@]}")
+UV_CACHE_DIR="${UV_CACHE_DIR}" "${RUN_CMD[@]}"

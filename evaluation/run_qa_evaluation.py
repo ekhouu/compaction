@@ -22,10 +22,36 @@ Example usage:
     python -m evaluation.run_qa_evaluation --dataset-name longhealth5 --chunking longhealth --model-name google/gemma-3-4b-it --query-config repeat --precomputed-budget-path head_budget_optimization/head_budgets/gemma-3-4b-it/optimized_agnostic.json
 """
 import argparse
+import os
+import random
+
 import torch
 
 from .qa_evaluator import QAEvaluator
 from .configs.utils import load_algorithm_config, load_query_config
+
+
+def set_global_seed(seed: int | None, deterministic_cuda: bool = False) -> None:
+    if seed is None:
+        return
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    try:
+        import numpy as np  # type: ignore
+        np.random.seed(seed)
+    except Exception:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic_cuda:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(True)
 
 
 def main():
@@ -68,6 +94,19 @@ def main():
         type=int,
         default=None,
         help='Number of questions per article. If specified, uses a random shuffled set of n questions per article (or all questions if less than n) (default: None, uses all questions)'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=67,
+        help='Global random seed for deterministic question sampling and evaluation (default: 67)'
+    )
+    parser.add_argument(
+        '--deterministic-cuda',
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help='Enable deterministic CUDA behavior where possible. 1 to enable, 0 to disable (default: 0)'
     )
 
     # Compaction arguments
@@ -206,8 +245,28 @@ def main():
         default=None,
         help='Experiment name for logging (default: None)'
     )
+    parser.add_argument(
+        '--bootstrap-samples',
+        type=int,
+        default=1000,
+        help='Number of bootstrap samples used to estimate accuracy confidence intervals (default: 1000, 0 disables)'
+    )
+    parser.add_argument(
+        '--ci-confidence',
+        type=float,
+        default=0.95,
+        help='Confidence level for bootstrap confidence intervals (default: 0.95)'
+    )
 
     args = parser.parse_args()
+    if args.bootstrap_samples < 0:
+        raise ValueError("--bootstrap-samples must be >= 0")
+    if not (0.0 < args.ci_confidence < 1.0):
+        raise ValueError("--ci-confidence must be in (0, 1)")
+    set_global_seed(args.seed, deterministic_cuda=bool(args.deterministic_cuda))
+    print(f"Using seed: {args.seed}")
+    if args.deterministic_cuda:
+        print("Deterministic CUDA mode requested")
 
     # Load algorithm hyperparameter config (pass target_size for configs that use it)
     method_config = load_algorithm_config(args.algorithm_config, target_size=args.target_size)
@@ -313,7 +372,10 @@ def main():
         experiment_name=args.name,
         algorithm_config_file=args.algorithm_config,
         query_config_file=args.query_config,
-        ignore_article_indices=args.ignore_article_indices
+        ignore_article_indices=args.ignore_article_indices,
+        seed=args.seed,
+        bootstrap_samples=args.bootstrap_samples,
+        ci_confidence=args.ci_confidence,
     )
 
 if __name__ == "__main__":

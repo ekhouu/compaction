@@ -7,6 +7,7 @@ question-answering performance.
 """
 import torch
 import json
+import random
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -366,6 +367,7 @@ class QAEvaluator:
         article_idx: int = 0,
         max_new_tokens: int = 2048,
         n_questions_per_article: Optional[int] = None,
+        question_sample_seed: Optional[int] = None,
         batch_size: Optional[int] = None,
         ignore_article_indices: bool = False,
         is_perplexity_eval: bool = False,
@@ -398,6 +400,8 @@ class QAEvaluator:
             Maximum number of tokens to generate per question
         n_questions_per_article : int, optional
             Number of questions to use per article. If specified, uses a random shuffled set of n questions
+        question_sample_seed : int, optional
+            Seed used for deterministic question sampling within this article.
         batch_size : int, optional
             If specified, processes questions in batches of this size.
         is_perplexity_eval : bool
@@ -737,15 +741,38 @@ class QAEvaluator:
         # Evaluate on questions (will also extract test queries if compute_stats=True)
         # We need to do this before computing detailed stats to extract test queries
         all_questions = article_data['questions']
+        question_sample_metadata = {
+            'seed': question_sample_seed,
+            'num_available': len(all_questions),
+            'selected_indices': list(range(len(all_questions))),
+            'selected_question_ids': [
+                q.get('question_unique_id', f'q_{idx}')
+                for idx, q in enumerate(all_questions)
+            ],
+        }
 
         # Shuffle and select n_questions_per_article if specified
         if n_questions_per_article is not None:
-            import random
-            rng = random.Random(67)
-            questions = all_questions.copy()
-            rng.shuffle(questions)
-            questions = questions[:n_questions_per_article]
-            print(f"Article has {len(all_questions)} questions (using random {len(questions)} questions)")
+            rng_seed = 67 if question_sample_seed is None else question_sample_seed
+            rng = random.Random(rng_seed)
+            indexed_questions = list(enumerate(all_questions))
+            rng.shuffle(indexed_questions)
+            indexed_questions = indexed_questions[:n_questions_per_article]
+            selected_indices = [idx for idx, _ in indexed_questions]
+            questions = [q for _, q in indexed_questions]
+            question_sample_metadata = {
+                'seed': rng_seed,
+                'num_available': len(all_questions),
+                'selected_indices': selected_indices,
+                'selected_question_ids': [
+                    q.get('question_unique_id', f'q_{idx}')
+                    for idx, q in indexed_questions
+                ],
+            }
+            print(
+                f"Article has {len(all_questions)} questions "
+                f"(using random {len(questions)} questions, seed={rng_seed})"
+            )
         else:
             questions = all_questions
             print(f"Article has {len(questions)} questions")
@@ -1480,6 +1507,7 @@ class QAEvaluator:
             'test_stats_time': test_stats_time,
             'compaction_stats': compaction_stats,
             'qa_results': qa_results,
+            'question_sampling': question_sample_metadata,
         }
 
         # Add perplexity if computed
@@ -1673,7 +1701,49 @@ class QAEvaluator:
             eval_queries_per_kv_head
         )
 
-    def _compute_overall_stats(self, all_results: List[Dict]) -> Dict:
+    @staticmethod
+    def _bootstrap_mean_ci(
+        values: List[float],
+        num_samples: int,
+        confidence: float,
+        seed: Optional[int],
+    ) -> Optional[Dict]:
+        if num_samples <= 0 or len(values) < 2:
+            return None
+        if not (0.0 < confidence < 1.0):
+            return None
+
+        rng = random.Random(67 if seed is None else seed)
+        n = len(values)
+        means: List[float] = []
+        for _ in range(num_samples):
+            sample_sum = 0.0
+            for _ in range(n):
+                sample_sum += values[rng.randrange(n)]
+            means.append(sample_sum / n)
+        means.sort()
+
+        alpha = 1.0 - confidence
+        lower_idx = max(0, int((alpha / 2.0) * num_samples))
+        upper_idx = min(num_samples - 1, int((1.0 - alpha / 2.0) * num_samples) - 1)
+        if upper_idx < lower_idx:
+            upper_idx = lower_idx
+
+        return {
+            'method': 'bootstrap',
+            'samples': num_samples,
+            'confidence': confidence,
+            'lower': means[lower_idx],
+            'upper': means[upper_idx],
+        }
+
+    def _compute_overall_stats(
+        self,
+        all_results: List[Dict],
+        bootstrap_samples: int = 0,
+        ci_confidence: float = 0.95,
+        seed: Optional[int] = None,
+    ) -> Dict:
         """
         Compute overall aggregate statistics across all articles and methods.
 
@@ -1697,7 +1767,7 @@ class QAEvaluator:
 
         overall_stats = {}
 
-        for method, method_results in results_by_method.items():
+        for method_idx, (method, method_results) in enumerate(results_by_method.items()):
             # Aggregate QA metrics across all articles
             total_questions = sum(r['qa_results'].get('total_questions', 0) for r in method_results)
             total_correct = sum(r['qa_results'].get('correct_answers', 0) for r in method_results)
@@ -1890,6 +1960,17 @@ class QAEvaluator:
                 overall_accuracy = overall_avg_ruler_score
             else:
                 overall_accuracy = total_correct / total_questions if total_questions > 0 else 0.0
+
+            question_scores: List[float] = []
+            for result in method_results:
+                for q in result['qa_results'].get('results_per_question', []):
+                    if is_qasper:
+                        question_scores.append(float(q.get('qasper_f1', 0.0)))
+                    elif is_ruler:
+                        question_scores.append(float(q.get('ruler_score', 0.0)))
+                    else:
+                        question_scores.append(1.0 if q.get('is_correct') else 0.0)
+
             overall_stats[method] = {
                 'num_articles': len(method_results),
                 'total_questions': total_questions,
@@ -1914,6 +1995,15 @@ class QAEvaluator:
                 'avg_tokens_per_second': avg_tokens_per_second,
                 'total_generated_tokens': total_generated_tokens,
             }
+
+            accuracy_ci = self._bootstrap_mean_ci(
+                values=question_scores,
+                num_samples=bootstrap_samples,
+                confidence=ci_confidence,
+                seed=None if seed is None else (seed + method_idx),
+            )
+            if accuracy_ci is not None:
+                overall_stats[method]['overall_accuracy_ci'] = accuracy_ci
 
             # Add QASPER avg F1 if applicable
             if overall_avg_f1 is not None:
@@ -1985,6 +2075,13 @@ class QAEvaluator:
             else:
                 print(f"  Overall accuracy: {stats['overall_accuracy']:.2%} ({stats['total_correct']}/{stats['total_questions']})")
             print(f"  Overall parse rate: {stats['overall_parse_rate']:.2%} ({stats['total_parseable']}/{stats['total_questions']})")
+            if 'overall_accuracy_ci' in stats:
+                ci = stats['overall_accuracy_ci']
+                print(
+                    f"  Bootstrap {ci['confidence']:.0%} CI: "
+                    f"[{ci['lower']:.2%}, {ci['upper']:.2%}] "
+                    f"({ci['samples']} samples)"
+                )
 
             # Perplexity if available
             if 'overall_avg_perplexity' in stats:
@@ -2087,12 +2184,15 @@ class QAEvaluator:
         n_articles: int = 1,
         start_article: int = 0,
         n_questions_per_article: Optional[int] = None,
+        seed: Optional[int] = None,
         max_new_tokens: int = 2048,
         batch_size: Optional[int] = None,
         compute_stats: bool = False,
         verbose_logging: bool = False,
         compute_perplexity: bool = False,
         perplexity_only: bool = False,
+        bootstrap_samples: int = 0,
+        ci_confidence: float = 0.95,
         method_kwargs: Optional[Dict[str, Dict]] = None,
         log_dir: str = 'logs/qa_evaluation',
         experiment_name: Optional[str] = None,
@@ -2119,6 +2219,8 @@ class QAEvaluator:
             Starting article index. Evaluates articles from start_article to start_article + n_articles.
         n_questions_per_article : int, optional
             Number of questions to use per article. If specified, uses a random shuffled set of n questions.
+        seed : int, optional
+            Base seed for deterministic question sampling and bootstrap CIs.
         max_new_tokens : int
             Maximum number of tokens to generate per question
         batch_size : int, optional
@@ -2130,6 +2232,10 @@ class QAEvaluator:
             Whether to compute perplexity of original generation under compacted cache
         perplexity_only : bool
             Whether to only compute perplexity without generating new answers
+        bootstrap_samples : int
+            Number of bootstrap samples used for accuracy confidence intervals. 0 disables.
+        ci_confidence : float
+            Confidence level for bootstrap confidence intervals.
         method_kwargs : dict, optional
             Keyword arguments for each method (keyed by method name)
         log_dir : str
@@ -2171,6 +2277,7 @@ class QAEvaluator:
         print(f"Target size: {target_size}")
         print(f"Ignore article indices: {ignore_article_indices}")
         print(f"Compute stats: {compute_stats}")
+        print(f"Seed: {seed}")
         print(f"Device: {self.device}")
         methods_str = ", ".join([f"{mc.method}({mc.fraction:.1%})" for mc in query_config.method_configs])
         print(f"Query config: methods=[{methods_str}], "
@@ -2266,6 +2373,7 @@ class QAEvaluator:
                     article_idx=article_idx,
                     max_new_tokens=max_new_tokens,
                     n_questions_per_article=n_questions_per_article,
+                    question_sample_seed=None if seed is None else (seed + article_idx),
                     batch_size=batch_size,
                     ignore_article_indices=ignore_article_indices,
                     is_perplexity_eval=is_perplexity_eval,
@@ -2325,15 +2433,23 @@ class QAEvaluator:
                 'start_article': start_article,
                 'article_indices': article_indices,
                 'n_questions_per_article': n_questions_per_article,
+                'seed': seed,
                 'query_config': query_config_dict,
                 'compute_stats': compute_stats,
                 'compute_perplexity': compute_perplexity,
+                'bootstrap_samples': bootstrap_samples,
+                'ci_confidence': ci_confidence,
             },
             'results': all_results
         }
 
         # Compute overall aggregate statistics
-        overall_stats = self._compute_overall_stats(all_results)
+        overall_stats = self._compute_overall_stats(
+            all_results,
+            bootstrap_samples=bootstrap_samples,
+            ci_confidence=ci_confidence,
+            seed=seed,
+        )
         output['overall_stats'] = overall_stats
 
         with open(filepath, 'w') as f:
