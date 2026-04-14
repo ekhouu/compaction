@@ -1,0 +1,3 @@
+[submodule "_external/turboquant_plus"]
+	path = _external/turboquant_plus
+	url = git@github.com:TheTom/turboquant_plus.git

@@ -3,9 +3,19 @@ __pycache__/
 .vscode/
 .DS_Store
 .claude/
+.toolchains/
+turboquant_plus_math_foundations.typ
 data/reference_answers_cache/*ruler*
 data/longbenchv2_cache.jsonl
 
 # Local downloaded model weights / caches
 .hf-models/
 .hf-cache/
+.gguf-models/
+*.gguf
+
+# External checkouts
+_external/*
+!_external/turboquant_plus/
+
+.codex
