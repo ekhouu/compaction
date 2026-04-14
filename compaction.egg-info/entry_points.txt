@@ -1,0 +1,4 @@
+[console_scripts]
+compaction-eval-qa = evaluation.run_qa_evaluation:main
+compaction-eval-reasoning = evaluation.run_reasoning_evaluation:main
+compaction-qa-demo = examples.qa_demo:main
